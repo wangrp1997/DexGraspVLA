@@ -51,20 +51,20 @@ After decompression, you'll find the dataset organized in [Zarr format](https://
 ### Dataset Structure
 
 #### `data` Group
-- **action**: (K, 13) 
+- **action**: $(K, 13)$ 
   - Contains action data of right robotic arm and hand at each timestep, represented by 13 degrees of freedom (DoFs).
-- **right_state**: (K, 13)
+- **right_state**: $(K, 13)$
   - Contains state data of the right robotic arm and hand at each timestep, represented by 13 DoFs.
-- **rgbm**: (K, H, W, 4)
+- **rgbm**: $(K, H, W, 4)$
   - Third-view images from the head camera with 4 channels, where the first 3 channels are RGB and the 4th channel is a binary mask.
-- **right_cam_img**: (K, H, W, 3)
+- **right_cam_img**: $(K, H, W, 3)$
   - First-view images from the wrist camera with 3 RGB channels.
 
 #### `meta` Group
-- **episode_ends**: (J,)
+- **episode_ends**: $(J,)$
   - Marks the ending indices of each demonstration episode, used to segment different demonstration sequences.
 
-Here, K represents the total number of samples and J denotes the number of demonstration episodes. 
+Here, $K$ represents the total number of samples and $J$ denotes the number of demonstration episodes. 
 
 ## Launch Training
 
