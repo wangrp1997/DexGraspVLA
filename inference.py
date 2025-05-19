@@ -391,7 +391,7 @@ class RoboticsSystem:
         os.makedirs(self.current_episode_dir, exist_ok=True)
 
         # Create log file
-        self.log_file_path = os.path.join(self.current_episode_dir, 'log.txt')
+        self.log_file_path = os.path.join(self.current_episode_dir, 'run.log')
         self.log_file = open(self.log_file_path, 'w')
 
         if manual:
