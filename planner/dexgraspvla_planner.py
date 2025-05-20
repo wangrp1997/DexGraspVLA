@@ -187,9 +187,9 @@ class DexGraspVLAPlanner:
         else:
             raise ValueError(f"The task_name {task_name} is not a valid task name.")
 
-        self.log(f"Planner requesting task: {task_name}.")
+        self.log(f"Planner requesting task: {task_name}.", message_type="request_task")
         messages_for_logging = self.process_message_for_logging(copy.deepcopy(messages))
-        self.log(f"Planner prompt:\n{messages_for_logging}")
+        self.log(f"Planner prompt:\n{messages_for_logging}", message_type="planner_prompt")
 
         if vl_inputs and "images" in vl_inputs:
             for key, image_url in vl_inputs["images"].items():
@@ -204,7 +204,7 @@ class DexGraspVLAPlanner:
         response = chat_completion.choices[0].message.content
         response_lower = response.lower()
 
-        self.log(f"Planner response:\n{response}")
+        self.log(f"Planner response:\n{response}", message_type="planner_response")
 
         if task_name == "grasping_instruction_proposal":
             # Return the text description of the target object
@@ -245,8 +245,8 @@ class DexGraspVLAPlanner:
         return messages_for_logging
 
 
-    def log(self, message):
-        log(message, self.log_file)
+    def log(self, message, message_type = None):
+        log(message, message_type, self.log_file)
 
     
     def save_image(self, image_url, task_name, image_type):
@@ -254,4 +254,4 @@ class DexGraspVLAPlanner:
         image = decode_base64_to_image(image_url)
         image_path = os.path.join(self.image_dir, f"{timestamp}_planner_request_{task_name}_{image_type}.png")
         plt.imsave(image_path, image)
-        self.log(f"The {image_type} saved when planner requests {task_name}.")
+        self.log(f"The {image_type} saved when planner requests {task_name}.", message_type="info")

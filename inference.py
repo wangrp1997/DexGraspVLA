@@ -242,11 +242,11 @@ class RoboticsSystem:
             if not self.in_post_run:
                 if select.select([sys.stdin], [], [], 0.1)[0]:
                     sys.stdin.readline()
-                    self.log("<Enter> detected, ending this episode.")
+                    self.log("<Enter> detected, ending this episode.", message_type="info")
                     self.save_image(self.third_color_image, "head_image_grasp_finish")
-                    self.log(f"Head camera image saved at grasp finish.")
+                    self.log(f"Head camera image saved at grasp finish.", message_type="info")
                     self.save_image(self.right_first_color_image, "wrist_image_grasp_finish")
-                    self.log(f"Wrist camera image saved at grasp finish.")
+                    self.log(f"Wrist camera image saved at grasp finish.", message_type="info")
                     self.in_post_run = True
             else:
                 time.sleep(0.1)  # Avoid excessive CPU usage
@@ -280,14 +280,14 @@ class RoboticsSystem:
                     if grasp_success:
                         self.consecutive_failed_attempts = 0  # Reset counter on success
                         self.in_post_run = True
-                        self.log("Grasp successful. Object has been grasped.")
+                        self.log("Grasp successful. Object has been grasped.", message_type="outcome")
                     else:
                         self.consecutive_failed_attempts += 1
-                        self.log("Grasp failed. Object is not successfully grasped.")
+                        self.log("Grasp failed. Object is not successfully grasped.", message_type="outcome")
 
                         # If 3 consecutive failures, reset
                         if self.consecutive_failed_attempts >= 3:
-                            self.log("Three consecutive failed attempts. Resetting robot.")
+                            self.log("Three consecutive failed attempts. Resetting robot.", message_type="outcome")
                             self.in_post_run = True
                             self.consecutive_failed_attempts = 0
             time.sleep(0.1)
@@ -334,13 +334,13 @@ class RoboticsSystem:
             self.reset_flags()
             clear_input_buffer()
 
-            self.log("Controller starts executing the current instruction.")
+            self.log("Controller starts executing the current instruction.", message_type="info")
             self.execute_grasping()
 
             # Finish and reset
             self.right_finish_reset()
             self.save_image(self.third_color_image, "head_image_episode_finish")
-            self.log("Head camera image saved at the end of the episode.")
+            self.log("Head camera image saved at the end of the episode.", message_type="info")
             self.close_episode()
 
 
@@ -362,7 +362,7 @@ class RoboticsSystem:
             
             while True:
                 self.save_image(self.third_color_image, "head_image")
-                self.log("Head camera image saved at the beginning of a grasping loop.")
+                self.log("Head camera image saved at the beginning of a grasping loop.", message_type="info")
 
                 # Step 1: Plan which object to grasp next
                 self.get_current_instruction()
@@ -374,7 +374,7 @@ class RoboticsSystem:
                 clear_input_buffer()
 
                 # Step 3: Execute grasping & check grasp outcome
-                self.log("Controller starts executing the current instruction.")
+                self.log("Controller starts executing the current instruction.", message_type="info")
                 self.execute_grasping()
                 
                 # Reset arm position after grasp attempt
@@ -386,7 +386,7 @@ class RoboticsSystem:
                     break
                     
             self.save_image(self.third_color_image, "head_image_episode_finish")
-            self.log("Head camera image saved at the end of the episode.")
+            self.log("Head camera image saved at the end of the episode.", message_type="info")
             self.close_episode()
 
 
@@ -420,9 +420,9 @@ class RoboticsSystem:
         self.log_file = open(self.log_file_path, 'w')
 
         if manual:
-            self.log(f"Episode starts, using manual mode.")
+            self.log(f"Episode starts, using manual mode.", message_type="info")
         else:
-            self.log(f"Episode starts, using planner mode.")
+            self.log(f"Episode starts, using planner mode.", message_type="info")
 
         # Create image directory
         self.img_dir = os.path.join(self.current_episode_dir, 'images')
@@ -452,7 +452,7 @@ class RoboticsSystem:
     def mark_bbox_manual(self):
         # Save original image
         self.save_image(self.third_color_image, "head_image_start")
-        self.log("Head camera image saved at the beginning of the episode.")
+        self.log("Head camera image saved at the beginning of the episode.", message_type="info")
         # Display image and get bounding box
         plt.figure()
         plt.imshow(self.third_color_image[..., ::-1])  # The image is BGR
@@ -496,14 +496,14 @@ class RoboticsSystem:
 
         # Save head camera image
         self.save_image(self.third_color_image, "head_image_for_user_prompt")
-        self.log("Head camera image saved at the beginning of the episode.")
+        self.log("Head camera image saved at the beginning of the episode.", message_type="info")
 
         clear_input_buffer()
         self.user_prompt = input("""Please enter your instruction: (It can be an abstract instruction like 'clear the table' or specific objects to be grabbed, such as 'grasp the red cups and blue cookies')\n>>>  """)
-        self.log(f"User prompt: {self.user_prompt}")
+        self.log(f"User prompt: {self.user_prompt}", message_type="outcome")
 
         plt.close()
-        
+
         # Save the initial image for comparison later
         self.initial_image_url = self.prepare_head_image()
 
@@ -524,7 +524,7 @@ class RoboticsSystem:
                     "user_prompt": self.user_prompt
                 }
             )
-        self.log(f"Current instruction: {self.current_instruction}")
+        self.log(f"Current instruction: {self.current_instruction}", message_type="outcome")
 
 
     def mark_bbox_planner(self):
@@ -543,7 +543,7 @@ class RoboticsSystem:
                 }
             )
         bbox = bbox_info['bbox_2d']
-        self.log(f"Bounding box marked by the planner: {bbox}.")
+        self.log(f"Bounding box marked by the planner: {bbox}.", message_type="outcome")
         bbox = np.array(bbox)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         img_with_bbox_filename = f"{timestamp}_head_image_with_bbox.png"
@@ -569,9 +569,9 @@ class RoboticsSystem:
             )
             
         if task_completed:
-            self.log(f"User prompt '{self.user_prompt}' is completed.")
+            self.log(f"User prompt '{self.user_prompt}' is completed.", message_type="outcome")
         else:
-            self.log(f"User prompt '{self.user_prompt}' is not completed, continuing to grasp.")
+            self.log(f"User prompt '{self.user_prompt}' is not completed, continuing to grasp.", message_type="outcome")
             
         return task_completed
 
@@ -615,7 +615,7 @@ class RoboticsSystem:
         plt.pause(0.5)
         plt.close(fig)
         
-        self.log(f"Head camera image with bounding box saved.")
+        self.log(f"Head camera image with bounding box saved.", message_type="info")
 
 
     def show_and_save_image_with_mask(self, image, mask, filename):
@@ -651,7 +651,7 @@ class RoboticsSystem:
         plt.pause(0.5)
         plt.close(fig)
         
-        self.log(f"Head camera image with mask saved.")
+        self.log(f"Head camera image with mask saved.", message_type="info")
 
 
     def get_state(self):
@@ -883,8 +883,8 @@ class RoboticsSystem:
         return get_image_url(processed_image)
 
 
-    def log(self, message):
-        log(message, self.log_file)
+    def log(self, message, message_type = None):
+        log(message, message_type, self.log_file)
 
 
     def save_image(self, image, filename):
@@ -911,12 +911,12 @@ class RoboticsSystem:
                 f.create_dataset('state', data=state_array)
                 f.create_dataset('action', data=action_array)
 
-            self.log(f"Total number of frames in this episode: {len(self.right_cam_buffer)}.")
+            self.log(f"Total number of frames in this episode: {len(self.right_cam_buffer)}.", message_type="info")
             
             # Close video writer and create new one
             self.video_writer.release()
         
-        self.log("Episode ends.")
+        self.log("Episode ends.", message_type="info")
 
         self.log_file.close()
 

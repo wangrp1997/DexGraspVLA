@@ -12,24 +12,54 @@ from urllib.parse import urlparse
 # Third-party library imports
 import numpy as np
 from omegaconf import OmegaConf
-from PIL import Image, ImageColor, ImageDraw, ImageFont
+from PIL import Image
 from scipy.interpolate import CubicSpline
+from rich.console import Console
+from rich.text import Text
+
+
+LOG_COLOR_SCHEME = {
+    "timestamp": "#4EC9B0",          # aqua green
+    "info": "#CE9178",               # warm orange
+    "outcome": "#C586C0",            # muted purple
+    "request_task": "#DCDCAA",       # parchment yellow
+    "planner_prompt": "#569CD6",     # cool blue
+    "planner_response": "#D7BA7D",   # sand brown
+    "execution_time": "#808080",     # neutral gray
+}
+console = Console()
+
 
 @contextmanager
 def timer(name, log_file = None):
     start = datetime.now()
     yield
     end = datetime.now()
-    log(f"Execution time of <{name}>: {(end - start).total_seconds():.2f} second(s).", log_file)
+    log(f"Execution time of <{name}>: {(end - start).total_seconds():.2f} second(s).", message_type="execution_time", log_file=log_file)
 
 
-def log(message, log_file = None):
-    timestamp = time.strftime("[%Y-%m-%d %H:%M:%S]")
-    full_message = f"{timestamp} {message}"
+def log(message: str, message_type: str = None, log_file=None):
+    # 获取时间戳和样式
+    timestamp_raw = time.strftime("[%Y-%m-%d %H:%M:%S]")
+    timestamp_color = LOG_COLOR_SCHEME["timestamp"]
+    message_color = LOG_COLOR_SCHEME.get(message_type, "white")
+
+    # 写入纯文本文件
     if log_file is not None:
-        log_file.write(f"{full_message}\n")
+        log_file.write(f"{timestamp_raw} {message}\n")
         log_file.flush()
-    print(full_message)
+
+    # 构建 rich Text 对象
+    text = Text()
+    text.append(f"{timestamp_raw} ", style=timestamp_color)
+
+    # 多行处理 + 空行保留
+    for idx, line in enumerate(message.splitlines()):
+        if idx > 0:
+            text.append("\n")  # 保持多行结构
+        text.append(line, style=message_color)  # 空行也保留颜色
+
+    console.print(text)
 
 
 def load_config(main_config_path, task_config_path):
