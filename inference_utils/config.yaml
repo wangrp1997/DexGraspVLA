@@ -42,6 +42,7 @@ sam:
 planner:
   api_key: "EMPTY"
   base_url: null
+  model_name: null
 
 # Logging Configuration
 logging:
