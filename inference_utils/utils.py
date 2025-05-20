@@ -3,6 +3,7 @@ import base64
 import socket
 import sys
 import time
+import select
 from contextlib import contextmanager
 from datetime import datetime
 from io import BytesIO
@@ -79,6 +80,12 @@ def encode_image_to_base64(image):
     return base64_str
 
 
+def get_image_url(image):
+    base64_str = encode_image_to_base64(image)
+    image_url = f"data:image/png;base64,{base64_str}"
+    return image_url
+
+
 def decode_base64_to_image(base64_string):
     padding = 4 - (len(base64_string) % 4)
     if padding != 4:
@@ -99,7 +106,7 @@ def preprocess_img(image):
     
     # Calculate crop area based on image ratio
     h_start = int(height * 0.0)
-    h_end = int(height * 0.55)
+    h_end = int(height * 0.6)
     w_start = int(width * 0.4)
     w_end = int(width * 0.9)
     
@@ -125,9 +132,25 @@ def cubic_spline_interpolation_7d(points, step=0.01):
     return interpolated_points
 
 
+def clear_input_buffer():
+    # Clear input buffer using different methods for better compatibility
+    try:
+        # For Windows
+        import msvcrt
+        while msvcrt.kbhit():
+            msvcrt.getch()
+    except ImportError:
+        # For Unix/Linux/MacOS
+        import termios
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:
+        # Fallback method
+        while select.select([sys.stdin], [], [], 0.0)[0]:
+            sys.stdin.read(1)
+
+
 def get_start_command():
-    # Clear input buffer
-    sys.stdin.flush()
+    clear_input_buffer()
     while True:
         user_input = input("Press <Enter> to start, <q> to quit.")
         if user_input == 'q':

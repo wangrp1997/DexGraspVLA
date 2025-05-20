@@ -27,10 +27,9 @@ from segment_anything import sam_model_registry, SamPredictor
 # Local imports
 from controller.common.pytorch_util import dict_apply
 from planner.dexgraspvla_planner import DexGraspVLAPlanner
-from inference_utils.utils import (cubic_spline_interpolation_7d, get_start_command,
-                           load_config, show_mask, update_array, encode_image_to_base64, 
-                           preprocess_img, check_url,
-                           timer, log)
+from inference_utils.utils import (cubic_spline_interpolation_7d, clear_input_buffer,
+                                    get_start_command, load_config, show_mask, update_array,
+                                    get_image_url, preprocess_img, check_url, timer, log)
 
 
 # Register now resolver
@@ -151,7 +150,8 @@ class RoboticsSystem:
             print("URL checked")
             self.planner = DexGraspVLAPlanner(
                 api_key=self.config["planner"]["api_key"], 
-                base_url=self.config["planner"]["base_url"])
+                base_url=self.config["planner"]["base_url"],
+                model_name=self.config["planner"]["model_name"])
 
 
     def init_utils_and_data(self):
@@ -243,17 +243,10 @@ class RoboticsSystem:
                 if select.select([sys.stdin], [], [], 0.1)[0]:
                     sys.stdin.readline()
                     self.log("<Enter> detected, ending this episode.")
-
-                    timestamp = time.strftime("%Y%m%d_%H%M%S")
-
-                    head_img_path = os.path.join(self.img_dir, f"{timestamp}_head_image_finish.png")
-                    cv2.imwrite(head_img_path, self.third_color_image)
-                    self.log(f"Head camera image saved.")
-
-                    wrist_img_path = os.path.join(self.img_dir, f"{timestamp}_wrist_image_finish.png")
-                    cv2.imwrite(wrist_img_path, self.right_first_color_image)
-                    self.log(f"Wrist camera image saved.")
-
+                    self.save_image(self.third_color_image, "head_image_grasp_finish")
+                    self.log(f"Head camera image saved at grasp finish.")
+                    self.save_image(self.right_first_color_image, "wrist_image_grasp_finish")
+                    self.log(f"Wrist camera image saved at grasp finish.")
                     self.in_post_run = True
             else:
                 time.sleep(0.1)  # Avoid excessive CPU usage
@@ -267,15 +260,36 @@ class RoboticsSystem:
                 current_pose = self.right_arm.get_current_pose()
                 current_height = current_pose[2]
                 if current_height > self.height_threshold:
-                    base64_image = encode_image_to_base64(self.third_color_image[..., ::-1])
-                    image_url = f"data:image/png;base64,{base64_image}"
-                    with timer("check_grasp_success", self.log_file):
-                        if self.planner.request_task(
-                            frame_path=image_url,
-                            task_name="check_grasp_success",
-                        ):
+                    # Get current head and wrist camera images
+                    head_image_url = get_image_url(self.third_color_image[..., ::-1])
+                    wrist_image_url = get_image_url(self.right_first_color_image[..., ::-1])
+
+                    # Step 3: Check if grasp is successful
+                    with timer("grasp outcome verification", self.log_file):
+                        grasp_success = self.planner.request_task(
+                            task_name="grasp_outcome_verification",
+                            vl_inputs={
+                                "images": {
+                                    "current_head_image": head_image_url,
+                                    "current_wrist_image": wrist_image_url
+                                },
+                                "grasping_instruction": self.current_instruction
+                            }
+                        )
+                        
+                    if grasp_success:
+                        self.consecutive_failed_attempts = 0  # Reset counter on success
+                        self.in_post_run = True
+                        self.log("Grasp successful. Object has been grasped.")
+                    else:
+                        self.consecutive_failed_attempts += 1
+                        self.log("Grasp failed. Object is not successfully grasped.")
+
+                        # If 3 consecutive failures, reset
+                        if self.consecutive_failed_attempts >= 3:
+                            self.log("Three consecutive failed attempts. Resetting robot.")
                             self.in_post_run = True
-                            self.log("Planner believes the task is done.")
+                            self.consecutive_failed_attempts = 0
             time.sleep(0.1)
             if not self.running:
                 break
@@ -318,29 +332,16 @@ class RoboticsSystem:
             bbox = self.mark_bbox_manual()
             self.initialize_sam_cutie(bbox)
             self.reset_flags()
+            clear_input_buffer()
 
             self.log("Controller starts executing the current instruction.")
-
-            # Execute grasping
-            while True:
-                if self.in_post_run:
-                    break
-                state = self.get_state()
-                mask = self.get_mask()
-                obs = self.get_obs(state, mask)  # TODO: There might be misalignment between mask and image, needs verification
-                attn_map_output_path = os.path.join(self.current_attn_maps_dir, f'{self.time_step}.pkl') if self.args.gen_attn_map else None
-                self.time_step += 1
-                obs_dict_np = self.process_obs(env_obs=obs, shape_meta=self.cfg.task.shape_meta)
-                obs_dict = dict_apply(obs_dict_np, 
-                    lambda x: torch.from_numpy(x).unsqueeze(0).to(self.device))
-                with torch.no_grad():
-                    action_pred = self.policy.predict_action(obs_dict, attn_map_output_path)
-                    action = action_pred[0].detach().to('cpu').numpy()
-                self.execute_action(action)
+            self.execute_grasping()
 
             # Finish and reset
-            self.close_episode()
             self.right_finish_reset()
+            self.save_image(self.third_color_image, "head_image_episode_finish")
+            self.log("Head camera image saved at the end of the episode.")
+            self.close_episode()
 
 
     def run_planner(self):
@@ -353,35 +354,59 @@ class RoboticsSystem:
             self.time_step = 0
             self.init_episode(manual=False)
             self.process_user_prompt()
+
+            # Add initial check here to see if prompt is already completed
+            if self.check_complete():
+                self.close_episode()
+                continue
+            
             while True:
+                self.save_image(self.third_color_image, "head_image")
+                self.log("Head camera image saved at the beginning of a grasping loop.")
+
+                # Step 1: Plan which object to grasp next
                 self.get_current_instruction()
+                
+                # Step 2: Mark bounding box for the target object
                 bbox = self.mark_bbox_planner()
                 self.initialize_sam_cutie(bbox)
                 self.reset_flags()
+                clear_input_buffer()
 
+                # Step 3: Execute grasping & check grasp outcome
                 self.log("Controller starts executing the current instruction.")
-                # Execute grasping
-                while True:
-                    if self.in_post_run:
-                        break
-                    state = self.get_state()
-                    mask = self.get_mask()
-                    obs = self.get_obs(state, mask)  # TODO: There might be misalignment between mask and image, needs verification
-                    attn_map_output_path = os.path.join(self.current_attn_maps_dir, f'{self.time_step}.pkl') if self.args.gen_attn_map else None
-                    self.time_step += 1
-                    obs_dict_np = self.process_obs(env_obs=obs, shape_meta=self.cfg.task.shape_meta)
-                    obs_dict = dict_apply(obs_dict_np, 
-                        lambda x: torch.from_numpy(x).unsqueeze(0).to(self.device))
-                    with torch.no_grad():
-                        action_pred = self.policy.predict_action(obs_dict, attn_map_output_path)
-                        action = action_pred[0].detach().to('cpu').numpy()
-                    self.execute_action(action)
+                self.execute_grasping()
                 
+                # Reset arm position after grasp attempt
                 self.right_finish_reset()
-                user_prompt_complete = self.check_complete()
-                if user_prompt_complete:
+                
+                # Step 4: Check if the entire task is completed
+                task_completed = self.check_complete()
+                if task_completed:
                     break
+                    
+            self.save_image(self.third_color_image, "head_image_episode_finish")
+            self.log("Head camera image saved at the end of the episode.")
             self.close_episode()
+
+
+    def execute_grasping(self):
+        # Execute grasping
+        while True:
+            if self.in_post_run:
+                break
+            state = self.get_state()
+            mask = self.get_mask()
+            obs = self.get_obs(state, mask)  # TODO: There might be misalignment between mask and image, needs verification
+            attn_map_output_path = os.path.join(self.current_attn_maps_dir, f'{self.time_step}.pkl') if self.args.gen_attn_map else None
+            self.time_step += 1
+            obs_dict_np = self.process_obs(env_obs=obs, shape_meta=self.cfg.task.shape_meta)
+            obs_dict = dict_apply(obs_dict_np, 
+                lambda x: torch.from_numpy(x).unsqueeze(0).to(self.device))
+            with torch.no_grad():
+                action_pred = self.policy.predict_action(obs_dict, attn_map_output_path)
+                action = action_pred[0].detach().to('cpu').numpy()
+            self.execute_action(action)
 
 
     def init_episode(self, manual=False):
@@ -426,11 +451,8 @@ class RoboticsSystem:
 
     def mark_bbox_manual(self):
         # Save original image
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        img_filename = f"{timestamp}_head_image_start.png"
-        img_path = os.path.join(self.img_dir, img_filename)
-        cv2.imwrite(img_path, self.third_color_image)
-        
+        self.save_image(self.third_color_image, "head_image_start")
+        self.log("Head camera image saved at the beginning of the episode.")
         # Display image and get bounding box
         plt.figure()
         plt.imshow(self.third_color_image[..., ::-1])  # The image is BGR
@@ -473,63 +495,53 @@ class RoboticsSystem:
         plt.pause(1)
 
         # Save head camera image
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        img_filename = f"{timestamp}_head_image_for_user_prompt.png"
-        img_path = os.path.join(self.img_dir, img_filename)
-        cv2.imwrite(img_path, self.third_color_image)
+        self.save_image(self.third_color_image, "head_image_for_user_prompt")
+        self.log("Head camera image saved at the beginning of the episode.")
 
-        sys.stdin.flush()
-        self.user_prompt = input("""Please enter your instruction: (It can be an abstract instruction like 'clear the table' or a specific object to be grabbed, such as 'grasp the red cups and blue cookies')\n>>>  """)
+        clear_input_buffer()
+        self.user_prompt = input("""Please enter your instruction: (It can be an abstract instruction like 'clear the table' or specific objects to be grabbed, such as 'grasp the red cups and blue cookies')\n>>>  """)
         self.log(f"User prompt: {self.user_prompt}")
 
         plt.close()
-
-        with timer("classify user prompt", self.log_file):
-            self.user_prompt_type = self.planner.request_task(
-                            task_name="classify_user_prompt",
-                            instruction=self.user_prompt,
-                            max_token=256
-            )
-        self.log(f"User prompt type: {self.user_prompt_type}.")
-        if self.user_prompt_type == "TypeI":  # Explicitly specifies grabbing specific items
-            image_url = self.prepare_head_image()
-            with timer("decompose user prompt", self.log_file):
-                self.object_list = self.planner.request_task(
-                            frame_path=image_url,
-                            task_name="decompose_user_prompt",
-                            instruction=self.user_prompt,
-                            max_token=512
-                        )
-                self.log(f"Object list: {self.object_list}.")
-        elif self.user_prompt_type == "TypeII":  # Abstract instruction without specific details
-            pass
-        else:
-            raise ValueError(f"The user prompt type {self.user_prompt_type} is invalid.")
+        
+        # Save the initial image for comparison later
+        self.initial_image_url = self.prepare_head_image()
 
 
     def get_current_instruction(self):
-        if self.user_prompt_type == "TypeI":  # Explicitly specifies grabbing specific items
-            self.current_instruction = self.object_list[0]
-        elif self.user_prompt_type == "TypeII":  # Abstract instruction without specific details
-            image_url = self.prepare_head_image()
-            with timer("generate instruction", self.log_file):
-                self.current_instruction = self.planner.request_task(
-                            frame_path=image_url,
-                            task_name="generate_instruction",
-                            instruction=None,
-                            max_token=512
-                        )
+        # Get the current desktop image
+        current_image_url = self.prepare_head_image()
+        
+        # Step 1: Plan which object to grasp next based on initial and current images
+        with timer("grasping instruction proposal", self.log_file):
+            self.current_instruction = self.planner.request_task(
+                task_name="grasping_instruction_proposal",
+                vl_inputs={
+                    "images": {
+                        "initial_head_image": self.initial_image_url,
+                        "current_head_image": current_image_url
+                    },
+                    "user_prompt": self.user_prompt
+                }
+            )
         self.log(f"Current instruction: {self.current_instruction}")
 
 
     def mark_bbox_planner(self):
-        image_url = self.prepare_head_image()
-        with timer("mark bounding box", self.log_file):
+        # Get the current desktop image for bounding box detection
+        current_image_url = self.prepare_head_image()
+        
+        # Step 2: Mark bounding box for the selected object
+        with timer("bounding box prediction", self.log_file):
             bbox_info = self.planner.request_task(
-                    frame_path=image_url,
-                    task_name="mark_bounding_box",
-                    instruction=self.current_instruction
-                )
+                task_name="bounding_box_prediction",
+                vl_inputs={
+                    "images": {
+                        "current_head_image": current_image_url
+                    },
+                    "grasping_instruction": self.current_instruction
+                }
+            )
         bbox = bbox_info['bbox_2d']
         self.log(f"Bounding box marked by the planner: {bbox}.")
         bbox = np.array(bbox)
@@ -540,33 +552,28 @@ class RoboticsSystem:
 
 
     def check_complete(self):
-        image_url = self.prepare_head_image()
-        with timer("check instruction complete", self.log_file):
-            self.current_instruction_complete = self.planner.request_task(
-                            frame_path=image_url,
-                            task_name="check_instruction_complete",
-                            instruction=self.current_instruction
-                        )
-        if self.current_instruction_complete:
-            self.log(f"Current instruction <{self.current_instruction}> is completed.")
-            if self.user_prompt_type == "TypeI":
-                self.object_list = self.object_list[1:]
-                user_prompt_complete = len(self.object_list) == 0
-            else:
-                with timer("check user prompt complete", self.log_file):
-                    user_prompt_complete = self.planner.request_task(
-                                    frame_path=image_url,
-                                    task_name="check_user_prompt_complete",
-                                    instruction=None
-                                )
+        # Get the current desktop image for completion check
+        current_image_url = self.prepare_head_image()
+        
+        # Step 4: Check if the overall task is completed
+        with timer("prompt completion check", self.log_file):
+            task_completed = self.planner.request_task(
+                task_name="prompt_completion_check",
+                vl_inputs={
+                    "images": {
+                        "initial_head_image": self.initial_image_url,
+                        "current_head_image": current_image_url
+                    },
+                    "user_prompt": self.user_prompt
+                }
+            )
+            
+        if task_completed:
+            self.log(f"User prompt '{self.user_prompt}' is completed.")
         else:
-            self.log(f"Current instruction <{self.current_instruction}> is not completed.")
-            user_prompt_complete = False
-        if user_prompt_complete:
-            self.log(f"User prompt <{self.user_prompt}> is completed.")
-        else:
-            self.log(f"User prompt <{self.user_prompt}> is not completed.")
-        return user_prompt_complete
+            self.log(f"User prompt '{self.user_prompt}' is not completed, continuing to grasp.")
+            
+        return task_completed
 
 
     def show_and_save_image_with_bbox(self, image, bbox, filename):
@@ -868,17 +875,22 @@ class RoboticsSystem:
         self.update_target = True
         self.in_post_run = False
         self.episode_start = time.time()
+        self.consecutive_failed_attempts = 0
 
     
     def prepare_head_image(self):
         processed_image = preprocess_img(self.third_color_image[..., ::-1])
-        base64_image = encode_image_to_base64(processed_image)
-        image_url = f"data:image/png;base64,{base64_image}"
-        return image_url
+        return get_image_url(processed_image)
 
 
     def log(self, message):
         log(message, self.log_file)
+
+
+    def save_image(self, image, filename):
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        img_path = os.path.join(self.img_dir, f"{timestamp}_{filename}.png")
+        cv2.imwrite(img_path, image)
 
 
     def close_episode(self):

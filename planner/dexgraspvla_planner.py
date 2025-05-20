@@ -1,10 +1,15 @@
-import httpx
-import json_repair
-from openai import OpenAI
 import os
 import time
+import json
+import copy
+from typing import Union
+
+import httpx
+import json_repair
 import matplotlib.pyplot as plt
-from planner.utils import parse_json, extract_list
+from openai import OpenAI
+
+from planner.utils import parse_json
 from inference_utils.utils import decode_base64_to_image, log
 
 
@@ -32,157 +37,164 @@ class DexGraspVLAPlanner:
 
     def request_task(self,
             task_name: str,
-            frame_path: str = None,
-            instruction: str = None,
-            max_token: int = 218
+            vl_inputs: dict[str, Union[str, dict]] = None,
+            max_token: int = 512
     ) -> str:
-        if task_name == "classify_user_prompt":
-            prompt = (
-                f"Analyze the following user prompt: {instruction}\n\n"
-                f"User prompt types:\n"
-                f"- Type I (return True): User prompts with any specific descriptions\n"
-                f"Examples:\n"
-                f"* Color-based: \"green objects\"\n"
-                f"* Position-based: \"objects from the right\"\n"
-                f"* Property-based: \"all cups\"\n"
-                f"* Combination: \"the red cup on the left\"\n\n"
-                f"- Type II (return False): Abstract prompts without any object descriptions\n"
-                f"Examples: \"clear the table\", \"clean up\", \"remove everything\"\n\n"
-                f"Please determine:\n"
-                f"- Is this a Type I prompt? (True/False)\n"
-                f"- Provide your reasoning\n\n"
-                f"Return format:\n"
-                f"True/False: your reasoning\n\n"
-                f"Examples:\n"
-                f"- \"grab the green cup\" -> True: Contains specific object (cup) and property (green)\n"
-                f"- \"clear the table\" -> False: No specific object characteristics mentioned"
-            )
+        if task_name == "grasping_instruction_proposal":
+            messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "You are a helpful assistant."}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": (
+                                f"You are controlling a robotic arm that needs to complete the following user prompt: {vl_inputs['user_prompt']}\n"
+                                f"I will show you two images. The initial image (before any actions) is:"
+                            )
+                        },
+                        {"type": "image_url", "image_url": {"url": vl_inputs["images"]["initial_head_image"]}},
+                        {"type": "text", "text": "The current image (after the latest action) is:"},
+                        {"type": "image_url", "image_url": {"url": vl_inputs["images"]["current_head_image"]}},
+                        {"type": "text", "text": (
+                                f"Your task is to select the **best object to grasp next** from the current image.\n"
+                                f"To identify objects, **use common sense and everyday knowledge** to infer what each item is.\n"
+                                f"For example, recognize cups, bottles, fruits, snacks, boxes, tools, etc.\n"
 
-        elif task_name == "decompose_user_prompt":
-            prompt = (
-                f"For user prompt: {instruction}\n"
-                f"Process:\n"
-                f"1. Analyze the user prompt and image together:\n"
-                f"- Match user prompt descriptions with visible objects in the image\n"
-                f"- If a description (e.g., \"green objects\") matches multiple objects, include all matching objects\n"
-                f"- Verify each mentioned object actually exists in the image\n\n"
-                f"2. Based on the robot arm's position (right edge of the screen) and table layout\n"
-                f"3. Determine the most efficient grasping sequence\n"
-                f"4. Generate a reordered list of objects to grasp\n\n"
-                f"Requirements:\n"
-                f"- Only include objects mentioned in the original user prompt\n"
-                f"- Keep position information for each object\n"
-                f"- Return as a list, ordered by grasping sequence\n\n"
-                f"Expected output format:\n"
-                f"[\"object with position 1\", \"object with position 2\", ...]"
-            )
+                                f"When choosing the best object to grasp, follow these principles:\n"
+                                f"1. Prefer objects on the right, then center, then left.\n"
+                                f"2. Avoid objects that are blocked or surrounded.\n"
+                                f"3. Avoid grasping objects that would cause other items to topple.\n"
+                                f"4. Select objects that best match the user prompt.\n\n"
 
-        elif task_name == "generate_instruction":
-            prompt = (
-                f"Analyze the current desktop layout and select the most suitable object to grasp, considering the following factors:\n\n"
-                f"Grasping Strategy:\n"
-                f"1. The robotic arm is positioned on the far right (outside the frame)\n"
-                f"2. Grasping Priority Order:\n"
-                f"   - Prioritize objects on the right to avoid knocking over other objects during later operations\n"
-                f"   - Then consider objects in the middle\n"
-                f"   - Finally, consider objects on the left\n"
-                f"3. Accessibility Analysis:\n"
-                f"   - Relative positions between objects\n"
-                f"   - Potential obstacles\n"
-                f"   - Whether the grasping path might interfere with other objects\n\n"
-                f"Please provide your response in the following JSON format:\n"
-                f"{{\n"
-                f"    \"analysis\": {{\n"
-                f"        \"priority_consideration\": \"explanation of why this object has priority\",\n"
-                f"        \"accessibility\": \"analysis of object's accessibility\",\n"
-                f"        \"risk_assessment\": \"potential risks in grasping this object\"\n"
-                f"    }},\n"
-                f"    \"target\": \"a comprehensive description of the target object (e.g., 'the blue cube on the far right of the desktop, next to the red cylinder')\"\n"
-                f"}}\n\n"
-                f"Ensure the output is in valid JSON format.\n"
-                f"Note: The 'target' field should ONLY contain the object's color, shape, and position in a natural, flowing sentence. Do not include any analysis or reasoning in this field."
-            )
+                                f"Please output ONLY ONE object that the robot should grasp next.\n"
 
-        elif task_name == "mark_bounding_box":
-            prompt = (
-                f"Analyze the image and identify the best matching object with the description: {instruction}.\n"
-                f"Instructions for object analysis:\n"
-                f"1. Select ONE object that best matches the description\n"
-                f"2. For the selected object, provide:\n"
-                f"- A concise label, object name (3-4 words max)\n"
-                f"- A detailed description (position, color, shape, context)\n"
-                f"- Accurate bbox coordinates\n\n"
-                f"Required JSON format with an example:\n"
-                f"```json\n"
-                f"{{\n"
-                f"    \"bbox_2d\": [x1, y1, x2, y2],\n"
-                f"    \"label\": \"green cup\",  # Keep this very brief (3-4 words)\n"
-                f"    \"description\": \"a cylindrical green ceramic cup located on the right side of the wooden table, next to the laptop\"  # Detailed description\n"
-                f"}}\n"
-                f"```\n\n"
-                f"Critical requirements:\n"
-                f"- Return EXACTLY ONE object\n"
-                f"- \"label\": Must be brief (3-4 words)\n"
-                f"- \"description\": Must be detailed and include spatial context\n"
-                f"- Use single JSON object format, not an array\n"
-                f"- Ensure bbox coordinates are within image boundaries"
-            )
+                                f"Return format (in English, natural language):\n"
+                                f"- A short sentence precisely describing the target object, including:\n"
+                                f"- color\n"
+                                f"- shape\n"
+                                f"- relative position (e.g., \"on the right\", \"in front\", \"next to the red box\")\n"
 
-        elif task_name == "check_grasp_success":
-            prompt = (
-                f"Briefly analyze the image and determine if the robotic arm has successfully grasped an object:\n"
-                f"1. Consider the spatial relationship between the robotic hand and the object\n"
-                f"2. Output format: explain your reasoning shortly and precisely, then conclude with a boolean value (True=grasped, False=not grasped)\n"
-                f"Keep it short and simple."
-            )
-        
-        elif task_name == "check_instruction_complete":  # TODO: check whether the prompt makes sense.
-            prompt = (
-                f"Please check whether {instruction} exists on the desktop. If it does not exist, output True; otherwise, output False."
-            )
-        
-        elif task_name == "check_user_prompt_complete":
-            prompt = (
-                f"Please analyze the table in the image:\n\n"
-                f"Requirements:\n"
-                f"- Only detect physical objects with noticeable height/thickness (3D objects)\n"
-                f"- Exclude from consideration:\n"
-                f"* Flat items (papers, tablecloths, mats)\n"
-                f"* Light projections\n"
-                f"* Shadows\n"
-                f"* Surface patterns or textures\n\n"
-                f"Return format:\n"
-                f"- True: if the table is empty of 3D objects\n"
-                f"- False: if there are any 3D objects, followed by their names\n\n"
-                f"Example responses:\n"
-                f"True  (for empty table)\n"
-                f"False: cup, bottle, plate  (for table with objects)"
-            )
+                                f"Example:\n"
+                                f"Grasp the blue cube on the right side of the table.\n"
+                            )
+                        }
+                    ]
+                }
+            ]
+
+        elif task_name == "bounding_box_prediction":
+            messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "You are a helpful assistant."}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": f"You are a robotic vision assistant. Your task is to locate the object described below in the given image:"},
+                        {"type": "image_url", "image_url": {"url": vl_inputs["images"]["current_head_image"]}},
+                        {"type": "text", "text": (
+                                f"and return its bounding box.\n\n"
+                                f"Grasping instruction: {vl_inputs['grasping_instruction']}\n\n"
+
+                                f"Instructions:\n"
+                                f"1. Carefully read the grasping instruction and match the target object to the best-fitting visible object in the image.\n"
+                                f"2. Select EXACTLY ONE object that best matches the description.\n"
+                                f"3. For the selected object, return the following in strict JSON format:\n"
+                                f"   - \"bbox_2d\": [x1, y1, x2, y2]  (integer pixel coordinates, top-left to bottom-right)\n"
+                                f"   - \"label\": a short 2-4 word name (e.g., \"blue cup\")\n"
+                                f"   - \"description\": a complete, natural-language description of the object's appearance and position\n\n"
+                                
+                                f"Requirements:\n"
+                                f"- Only return one object.\n"
+                                f"- Coordinates must be valid and within image boundaries.\n"
+                                f"- Do not guess if the object is not visible"
+                            )
+                        }
+                    ]
+                }
+            ]
+
+        elif task_name == "grasp_outcome_verification":
+            messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "You are a helpful assistant."}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "I will show you two images. The top-down view from the head camera is:"},
+                        {"type": "image_url", "image_url": {"url": vl_inputs["images"]["current_head_image"]}},
+                        {"type": "text", "text": "The close-up view from the wrist camera is:"},
+                        {"type": "image_url", "image_url": {"url": vl_inputs["images"]["current_wrist_image"]}},
+                        {"type": "text", "text": (
+                                f"Grasping instruction: {vl_inputs['grasping_instruction']}\n\n"
+
+                                f"Task:\n"
+                                f"Determine whether the robotic arm has **successfully grasped the target object**.\n"
+
+                                f"You should consider:\n"
+                                f"- Whether the target object is still visible on the table.\n"
+                                f"- Whether the object is securely held in the robotic hand.\n"
+
+                                f"Output format: A reasoning and a boolean value (True=successfully grasped, False=not grasped).\n"
+                                
+                                f"Keep it short and simple.\n\n"
+                            )
+                        }
+                    ]
+                }
+            ]
+
+        elif task_name == "prompt_completion_check":
+            messages = [
+                {
+                    "role": "system",
+                    "content": [{"type": "text", "text": "You are a helpful assistant."}],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": (
+                                f"The robot is trying to complete the following user prompt: {vl_inputs['user_prompt']}\n"
+                                f"I will show you two images. The initial image (before any actions) is:"
+                            )
+                        },
+                        {"type": "image_url", "image_url": {"url": vl_inputs["images"]["initial_head_image"]}},
+                        {"type": "text", "text": "The current image (after the latest action) is:"},
+                        {"type": "image_url", "image_url": {"url": vl_inputs["images"]["current_head_image"]}},
+                        {"type": "text", "text": (
+                                f"Please compare the two images and determine whether the user prompt has been fully completed.\n"
+
+                                f"Instructions:\n"
+                                f"- Only consider visible 3D objects.\n"
+                                f"- If all target objects have been removed or grasped, return True.\n"
+                                f"- If some relevant objects remain, return False.\n"
+
+                                f"Output format: A reasoning and a boolean value (True=completed, False=not completed).\n"
+                                
+                                f"Example:\n"
+                                f"All blue objects have been removed from the table: True. \n"
+                            )
+                        }
+                    ]
+                }
+            ]
 
         else:
             raise ValueError(f"The task_name {task_name} is not a valid task name.")
 
-        messages = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": "You are a helpful assistant."}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": prompt}]
-            }
-        ]
-        if frame_path is not None:
-            messages[1]["content"].append({
-                "type": "image_url",
-                "image_url": {"url": frame_path}
-            })
-            # output the image to the image_dir
-            self.save_image(frame_path, task_name)
-
         self.log(f"Planner requesting task: {task_name}.")
-        self.log(f"Planner prompt:\n{prompt}")
+        messages_for_logging = self.process_message_for_logging(copy.deepcopy(messages))
+        self.log(f"Planner prompt:\n{messages_for_logging}")
 
+        if vl_inputs and "images" in vl_inputs:
+            for key, image_url in vl_inputs["images"].items():
+                self.save_image(image_url, task_name, key)
+        
         chat_completion = self.client.chat.completions.create(
             model=self.model,
             max_completion_tokens=max_token,
@@ -194,46 +206,52 @@ class DexGraspVLAPlanner:
 
         self.log(f"Planner response:\n{response}")
 
-        if task_name == "classify_user_prompt":
-            if 'true' in response_lower:
-                return "TypeI"
-            elif 'false' in response_lower:
-                return "TypeII"
-            else:
-                raise ValueError(f"The output text {response} is in the wrong format.")
-        elif task_name == "decompose_user_prompt":
-            list_output = extract_list(response)
-            if type(list_output) == list:
-                return list_output
-            else:
-                raise ValueError(f"The output text {list_output} is not a valid list.")
-        elif task_name == "generate_instruction":
-            generate_task_str = parse_json(response)
-            generate_task_json = json_repair.loads(generate_task_str)
-            generate_task = generate_task_json['target']
-            if type(generate_task) == str:
-                return generate_task
-            else:
-                raise ValueError(f"The output text {generate_task} is not a valid string.")
-        elif task_name == "mark_bounding_box":
+        if task_name == "grasping_instruction_proposal":
+            # Return the text description of the target object
+            return response.strip()
+            
+        elif task_name == "bounding_box_prediction":
             bbox_str = parse_json(response)
             bbox_json = json_repair.loads(bbox_str)
             return bbox_json
+            
         else:
             if 'true' in response_lower:
                 return True
             elif 'false' in response_lower:
                 return False
             else:
-                raise ValueError(f"The output text {response} does not contain a valid boolean value.")
+                raise ValueError(f"The output text {response} does not contain a valid boolean value.") 
 
-    
+    def process_message_for_logging(self, messages):
+        
+        def replace_base64_images(obj):
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    if isinstance(value, str) and value.startswith(('data:image', 'http')):
+                        obj[key] = '<omitted>'
+                    else:
+                        replace_base64_images(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    replace_base64_images(item)
+            return obj
+        
+        # Process the messages copy
+        processed_messages = replace_base64_images(messages)
+        
+        # Convert to formatted JSON string
+        messages_for_logging = json.dumps(processed_messages, indent=2, ensure_ascii=False)
+        return messages_for_logging
+
+
     def log(self, message):
         log(message, self.log_file)
 
     
-    def save_image(self, image_url, task_name):
+    def save_image(self, image_url, task_name, image_type):
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         image = decode_base64_to_image(image_url)
-        image_path = os.path.join(self.image_dir, f"{timestamp}_planner_request_{task_name}.png")
+        image_path = os.path.join(self.image_dir, f"{timestamp}_planner_request_{task_name}_{image_type}.png")
         plt.imsave(image_path, image)
+        self.log(f"The {image_type} saved when planner requests {task_name}.")
