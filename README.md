@@ -113,7 +113,7 @@ The following command is used to deploy the model:
 python -m vllm.entrypoints.openai.api_server --host 0.0.0.0 --port 8001 \
  --model <path to Qwen2.5-VL-72B-Instruct> --seed 42 -tp 1 \
  --speculative_model <path to Qwen2.5-VL-7B-Instruct> --num_speculative_tokens 5 \
- --gpu_memory_utilization 0.9 --tensor-parallel-size 4
+ --gpu_memory_utilization 0.9 --tensor-parallel-size 4 --limit-mm-per-prompt "image=10"
 ```
 
 
