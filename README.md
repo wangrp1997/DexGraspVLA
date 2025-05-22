@@ -167,7 +167,6 @@ During execution, detailed logs are generated and stored in the `logs` directory
 - **Planner prompts & responses** – inputs and outputs from the vision-language model (VLM)
 - **Optional data** – attention maps and rollout data, if enabled
 
-Example logs can be downloaded [here](https://drive.google.com/file/d/1s6axQUKc6itKfpsIP1zTNX4Khu0yBTn9/view?usp=sharing).
 
 
 # Citation
