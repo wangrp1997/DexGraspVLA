@@ -328,7 +328,7 @@ class RoboticsSystem:
             self.time_step = 0
             self.init_episode(manual=True)
 
-            # Receive bounging box and track mask
+            # Receive bounding box and track mask
             bbox = self.mark_bbox_manual()
             self.initialize_sam_cutie(bbox)
             self.reset_flags()
