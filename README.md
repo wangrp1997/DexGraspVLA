@@ -17,11 +17,12 @@
 
 First, please create and activate the conda environment:
 ```bash
-conda create -n dexgraspvla python=3.9
+conda create -n dexgraspvla python=3.10
 conda activate dexgraspvla
-git clone https://github.com/Psi-Robot/DexGraspVLA.git
+git clone https://github.com/wangrp1997/DexGraspVLA.git
 cd DexGraspVLA
 pip install -r requirements.txt
+pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu118
 ```
 
 Then, please install [SAM](https://github.com/facebookresearch/segment-anything) and [Cutie](https://github.com/hkchengrex/Cutie) following the official instructions.
