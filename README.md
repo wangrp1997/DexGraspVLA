@@ -29,7 +29,7 @@ pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu12
 
 Then, please install [SAM](https://github.com/facebookresearch/segment-anything) and [Cutie](https://github.com/hkchengrex/Cutie) following the official instructions.
 
-The CUDA version we use is 12.6.
+The CUDA version we use is 12.8.
 
 # DexGraspVLA Controller
 

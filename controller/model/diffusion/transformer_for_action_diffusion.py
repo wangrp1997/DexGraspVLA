@@ -1,3 +1,9 @@
+import os
+# 强制禁用 xFormers 和 Flash Attention
+os.environ['XFORMERS_DISABLE_FLASH_ATTN'] = '1'
+os.environ['TORCH_USE_CUDA_DSA'] = '0'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+
 from typing import Union, Optional, List
 import logging
 import torch
@@ -6,10 +12,42 @@ from controller.model.common.module_attr_mixin import ModuleAttrMixin
 import math
 
 from torch.jit import Final
-from timm.models.vision_transformer import Attention, Mlp, RmsNorm, use_fused_attn
+from timm.models.vision_transformer import Mlp, RmsNorm
 import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
+
+# 自定义 Attention 类，不使用 Flash Attention
+class CustomAttention(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_norm=False, 
+                 attn_drop=0., proj_drop=0., norm_layer=nn.LayerNorm):
+        super().__init__()
+        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv.unbind(0)
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        # 使用标准注意力，不使用 Flash Attention
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 # embedding layers for timestep, referring to RDT, DiT
 class TimestepEmbedder(nn.Module):
@@ -55,10 +93,9 @@ class TimestepEmbedder(nn.Module):
 # Cross Attention Layers, referring to RDT
 class CrossAttention(nn.Module):
     """
-    A cross-attention layer with flash attention,
+    A cross-attention layer without flash attention,
     to incorporate the conditional information into main sequence.
     """
-    fused_attn: Final[bool]
     def __init__(
             self,
             dim: int,
@@ -75,7 +112,6 @@ class CrossAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim ** -0.5
-        self.fused_attn = use_fused_attn()
 
         self.q = nn.Linear(dim, dim, bias=qkv_bias)
         self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
@@ -124,33 +160,18 @@ class CrossAttention(nn.Module):
             attn_mask = self.masks[idx.squeeze()]
         
         attn_weights = None
-        if self.fused_attn:
-            x = F.scaled_dot_product_attention(
-                q, k, v,
-                dropout_p=self.attn_drop.p if self.training else 0.,
-                attn_mask=attn_mask
-            )
-            # For fused attention, we need to manually calculate attention weights
-            if gen_attn_map:
-                with torch.no_grad():
-                    attn_weights = (q @ k.transpose(-2, -1)) * self.scale
-                    if attn_mask is not None:
-                        attn_weights = attn_weights.masked_fill_(attn_mask.logical_not(), float('-inf'))
-                    attn_weights = attn_weights.softmax(dim=-1)  # (B, num_heads, T, L)
-                    attn_weights = attn_weights.detach().cpu().to(torch.float16).numpy()
-                    attn_weights = attn_weights[:2, :, 0, :]  # Only save the first two samples, the first action token
-        else:
-            q = q * self.scale
-            attn = q @ k.transpose(-2, -1)
-            if attn_mask is not None:
-                attn = attn.masked_fill_(attn_mask.logical_not(), float('-inf'))
-            attn = attn.softmax(dim=-1)
-            if gen_attn_map:
-                attn_weights = attn.detach().cpu().to(torch.float16).numpy()  # (B, num_heads, T, L)
-                attn_weights = attn_weights[:2, :, 0, :]  # Only save the first two samples, the first action token
-            if self.attn_drop.p > 0:
-                attn = self.attn_drop(attn)
-            x = attn @ v
+        # 使用标准注意力，不使用 Flash Attention
+        q = q * self.scale
+        attn = q @ k.transpose(-2, -1)
+        if attn_mask is not None:
+            attn = attn.masked_fill_(attn_mask.logical_not(), float('-inf'))
+        attn = attn.softmax(dim=-1)
+        if gen_attn_map:
+            attn_weights = attn.detach().cpu().to(torch.float16).numpy()  # (B, num_heads, T, L)
+            attn_weights = attn_weights[:2, :, 0, :]  # Only save the first two samples, the first action token
+        if self.attn_drop.p > 0:
+            attn = self.attn_drop(attn)
+        x = attn @ v
             
         x = x.permute(0, 2, 1, 3).reshape(B, N, C)
         x = self.proj(x)
@@ -166,10 +187,12 @@ class RDTBlock(nn.Module):
         # self-attention
         # x (B,T,n_emb)
         self.norm1 = RmsNorm(hidden_size, eps=1e-6)
-        self.attn = Attention(
+        
+        # 使用自定义 Attention 类
+        self.attn = CustomAttention(
             dim=hidden_size, num_heads=num_heads, 
             qkv_bias=True, qk_norm=True, 
-            norm_layer=RmsNorm,**block_kwargs)
+            norm_layer=RmsNorm, **block_kwargs)
         
         # cross-attention
         # x (B,T,n_emb), c (B,N+1,n_emb)
@@ -206,7 +229,6 @@ class RDTBlock(nn.Module):
         return x, attn_weights
 
 
-
 class TransformerForActionDiffusion(ModuleAttrMixin):
     def __init__(self,
         input_dim: int,
@@ -226,7 +248,6 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
         self.input_emb = nn.Linear(input_dim, n_emb)
         self.pos_emb = nn.Parameter(torch.randn((1, action_horizon, n_emb)))
         # time embedding
-        # self.time_emb = SinusoidalPosEmb(n_emb) # previous
         self.time_emb = TimestepEmbedder(hidden_size=n_emb)
         
         # learnable position embedding
@@ -279,25 +300,22 @@ class TransformerForActionDiffusion(ModuleAttrMixin):
             nn.SiLU,
             nn.GELU,
             nn.Identity,
-            RDTBlock)
+            RDTBlock,
+            CustomAttention)  # 添加 CustomAttention
         if isinstance(module, (nn.Linear)):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if isinstance(module, nn.Linear) and module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, (Attention, CrossAttention)):
+        elif isinstance(module, (CrossAttention)):
         # Weight initialization in Attention module
             if hasattr(module, 'q'):
                 torch.nn.init.normal_(module.q.weight, mean=0.0, std=0.02)
                 if module.q.bias is not None:
                     torch.nn.init.zeros_(module.q.bias)
-            if hasattr(module, 'k'):
-                torch.nn.init.normal_(module.k.weight, mean=0.0, std=0.02)
-                if module.k.bias is not None:
-                    torch.nn.init.zeros_(module.k.bias)
-            if hasattr(module, 'v'):
-                torch.nn.init.normal_(module.v.weight, mean=0.0, std=0.02)
-                if module.v.bias is not None:
-                    torch.nn.init.zeros_(module.v.bias)
+            if hasattr(module, 'kv'):
+                torch.nn.init.normal_(module.kv.weight, mean=0.0, std=0.02)
+                if module.kv.bias is not None:
+                    torch.nn.init.zeros_(module.kv.bias)
             if hasattr(module, 'proj'):
                 torch.nn.init.normal_(module.proj.weight, mean=0.0, std=0.02)
                 if module.proj.bias is not None:
