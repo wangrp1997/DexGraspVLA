@@ -17,19 +17,16 @@
 
 First, please create and activate the conda environment:
 ```bash
-conda create -n dexgraspvla python=3.10
+conda create -n dexgraspvla python=3.9
 conda activate dexgraspvla
-git clone https://github.com/wangrp1997/DexGraspVLA.git
+git clone https://github.com/Psi-Robot/DexGraspVLA.git
 cd DexGraspVLA
 pip install -r requirements.txt
-pip uninstall torch torchvision
-pip3 install torch torchvision --index-url https://download.pytorch.org/whl/cu128
-
 ```
 
 Then, please install [SAM](https://github.com/facebookresearch/segment-anything) and [Cutie](https://github.com/hkchengrex/Cutie) following the official instructions.
 
-The CUDA version we use is 12.8.
+The CUDA version we use is 12.6.
 
 # DexGraspVLA Controller
 
